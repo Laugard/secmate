@@ -1,0 +1,29 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Runtime- og studiedata må ikke i git
+data/*.db
+data/*.db-*
+data/documents/*
+!data/documents/.gitkeep
+data/backups/*
+!data/backups/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
