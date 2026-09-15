@@ -13,16 +13,30 @@ Senest opdateret: 15. september 2026.
 | 6 | done | atomic daily claim/restart, digest fallback, cleanup og backup/rotation | Live kanalopslag kræver Discord |
 | 7 | done | RSS-fixture, HTML-sanitization, HTTPS, injection-resistens, JSON fallback, dedupe | Officielt feed og kanaler live-testes manuelt |
 | 8 | done | allowlist, flere runder, ukendt tool og 4-runders cap | Live model-toolcalling kræver Ollama |
-| 9 | blocked_manual | 44 tests, Ruff, format, strict mypy, smoke og audit grønne | L-01–L-06 og lokal doctor mangler |
+| 9 | blocked_manual | 51 tests, Ruff, format, strict mypy, smoke og audit grønne | L-01–L-06 og lokal doctor mangler |
+
+## Kodegennemgang 15. september 2026
+
+Rettet efter de første live-tests i Discord:
+
+- `/health` viste embeddingmodellen rød: Ollama rapporterer `embeddinggemma:latest`, og sammenligningen ignorerer nu det implicitte `:latest`-tag.
+- `/ask` skrev "Belæg mangler" og en kilde i samme svar: modellen svarer nu med et fast token (`INGEN_BELÆG`), som koden afgør no-evidence-grenen på, og viser i stedet "Nærmeste uddrag".
+- `/news refresh` gav "feedfejl: 1": cisa.gov svarer 403 til en bar produkt-User-Agent. Feedklienten sender nu en konventionel feedlæser-header med kontakt-URL (verificeret live: 30 entries), og fejlteksten viser vært og HTTP-status.
+- Nyheder blev klassificeret af modellen FØR dedupe, så hver refresh kostede én generering per allerede gemt entry. Dedupe sker nu først; `published_at_utc` udfyldes fra feedet.
+- Strukturerede kald bruger Ollamas `format=json` og accepterer kodeindhegnet JSON; `think=False` slår qwen3's skjulte tænkepas fra, som ellers brugte timeout-budgettet.
+- Daglig oprydning og backup kørte kun i minuttet 02:00 præcis; en slukket host kørte den derfor aldrig. Den følger nu samme "én gang per dato ved eller efter tidspunktet"-regel som digest. En fejl i scheduler-loopet stopper ikke længere loopet stille; den logges.
+- Logfilteret redigerede formatstrengen før argumenterne blev sat ind, så `%s`-værdier gik tabt i loggen. Advarsler vises nu også i terminalen.
+- Windows har ingen tidszonedatabase; `tzdata` er tilføjet til requirements (tre tests fejlede uden).
+- Mindre: `/news latest` har kategori-valg i Discord, agentens tools har rigtige parameterskemaer, digest viser lokal tid og vælger et tilfældigt uddrag til quizzen, embeddings sendes i batches af 32, cosine-similarity bruger `math.sumprod`.
 
 ## Seneste automatiske evidens
 
 ```text
-Python 3.12.14
+Python 3.12.13
 ruff format --check: pass
 ruff check: pass
 mypy src/secmate: pass (strict)
-pytest: 44 passed
+pytest: 51 passed
 scripts/smoke_test.py: pass
 pip-audit requirements.txt: No known vulnerabilities found
 ```

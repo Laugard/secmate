@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -10,8 +11,8 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from secmate.config import Settings
-from secmate.errors import SecMateError, ValidationError
+from secmate.config import NEWS_CATEGORY_CHANNEL_KEYS, Settings
+from secmate.errors import SecMateError
 from secmate.repositories.database import (
     Database,
     DeadlineRepository,
@@ -22,7 +23,7 @@ from secmate.repositories.database import (
     backup_database,
     cleanup,
 )
-from secmate.services.agent_service import AgentService
+from secmate.services.agent_service import AgentService, ToolSpec
 from secmate.services.digest_service import DigestService
 from secmate.services.ingestion_service import IngestionService
 from secmate.services.news_service import FeedClient, NewsService
@@ -33,6 +34,21 @@ from secmate.utils.time import local_deadline_to_utc, parse_utc
 from secmate.utils.validation import bounded_text, reject_likely_secret
 
 LOGGER = logging.getLogger(__name__)
+
+NEWS_CATEGORY_CHOICES = [
+    app_commands.Choice(name=category, value=category)
+    for category in ("alle", *NEWS_CATEGORY_CHANNEL_KEYS)
+]
+# Maintenance runs once per local day at or after this time, on the same claim-a-date rule as
+# the digest: a host that is asleep at the exact minute still runs it when it wakes.
+MAINTENANCE_TIME_LOCAL = "02:00"
+
+
+def remaining_text(delta: timedelta) -> str:
+    """Time left as days and hours; never negative, so an overdue item reads as 0 timer."""
+    hours = max(0, int(delta.total_seconds() // 3600))
+    days, hours = divmod(hours, 24)
+    return f"{days} dage {hours} timer" if days else f"{hours} timer"
 
 
 def minimal_intents() -> discord.Intents:
@@ -104,7 +120,7 @@ class SecMateClient(discord.Client):
             ),
             settings.news_retention_days,
         )
-        self.digest = DigestService(self.deadlines, self.documents, self.ollama)
+        self.digest = DigestService(self.deadlines, self.documents, self.ollama, settings.timezone)
         self._register_commands()
 
     async def setup_hook(self) -> None:
@@ -231,9 +247,8 @@ class SecMateClient(discord.Client):
             for item in items:
                 due = parse_utc(item.due_at_utc)
                 local = due.astimezone(self.settings.timezone)
-                remaining = due - now
                 lines.append(
-                    f"`{item.id}` — {item.title}: {local:%Y-%m-%d %H:%M} ({max(0, int(remaining.total_seconds() // 3600))} timer)"
+                    f"`{item.id}` — {item.title}: {local:%Y-%m-%d %H:%M} ({remaining_text(due - now)})"
                 )
             await interaction.response.send_message(
                 "\n".join(lines)[:1900] or "Ingen kommende deadlines.", allowed_mentions=NO_MENTIONS
@@ -284,11 +299,10 @@ class SecMateClient(discord.Client):
         news_group = app_commands.Group(name="news", description="Sikkerhedsnyheder")
 
         @news_group.command(name="latest", description="Vis seneste gemte nyheder")
+        @app_commands.choices(category=NEWS_CATEGORY_CHOICES)
         async def news_latest(
             interaction: discord.Interaction[Any], category: str = "alle"
         ) -> None:
-            if category not in {*self.settings.news_channel_ids, "alle"}:
-                raise ValidationError("Ukendt kategori")
             items = await self.news_repository.latest(category)
             text = (
                 "\n\n".join(
@@ -306,9 +320,10 @@ class SecMateClient(discord.Client):
             await interaction.response.defer(thinking=True)
             items, errors = await self.news.refresh(self.settings.news_max_items_per_run)
             posted = await self.post_news_items(items)
+            detail = f" ({'; '.join(errors)})" if errors else ""
             await followup_parts(
                 interaction,
-                f"Nye nyheder: {len(items)}; postet: {posted}; feedfejl: {len(errors)}",
+                f"Nye nyheder: {len(items)}; postet: {posted}; feedfejl: {len(errors)}{detail}",
             )
 
         self.tree.add_command(news_group)
@@ -348,6 +363,42 @@ class SecMateClient(discord.Client):
                 "list_memories": memories_tool,
                 "latest_news": latest_news_tool,
             },
+            specs={
+                "search_documents": ToolSpec(
+                    "Søg i gruppens indekserede studiedokumenter og få uddrag med kilder.",
+                    {
+                        "type": "object",
+                        "properties": {"query": {"type": "string", "description": "Søgetekst"}},
+                        "required": ["query"],
+                    },
+                ),
+                "list_deadlines": ToolSpec(
+                    "Vis kommende deadlines.",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "days_ahead": {
+                                "type": "integer",
+                                "description": "Antal dage frem (1-90), standard 7",
+                            }
+                        },
+                    },
+                ),
+                "list_memories": ToolSpec("Vis gruppens fælles noter."),
+                "latest_news": ToolSpec(
+                    "Vis seneste gemte sikkerhedsnyheder.",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "category": {
+                                "type": "string",
+                                "enum": ["alle", *NEWS_CATEGORY_CHANNEL_KEYS],
+                            },
+                            "limit": {"type": "integer", "description": "1-5, standard 5"},
+                        },
+                    },
+                ),
+            },
         )
 
         @self.tree.command(name="assistant", description="Kombinér read-only SecMate-kilder")
@@ -363,12 +414,12 @@ class SecMateClient(discord.Client):
             interaction: discord.Interaction[Any], error: app_commands.AppCommandError
         ) -> None:
             original = getattr(error, "original", error)
-            message = (
-                str(original)
-                if isinstance(original, SecMateError)
-                else "Der opstod en sikker intern fejl. Prøv igen."
-            )
-            LOGGER.warning("command_failed type=%s", type(original).__name__)
+            if isinstance(original, SecMateError):
+                message = str(original)
+                LOGGER.warning("command_rejected type=%s", type(original).__name__)
+            else:
+                message = "Der opstod en sikker intern fejl. Prøv igen."
+                LOGGER.error("command_failed type=%s", type(original).__name__, exc_info=original)
             if interaction.response.is_done():
                 await interaction.followup.send(
                     message, ephemeral=True, allowed_mentions=NO_MENTIONS
@@ -378,51 +429,63 @@ class SecMateClient(discord.Client):
                     message, ephemeral=True, allowed_mentions=NO_MENTIONS
                 )
 
+    async def _send_digest(self, guild_id: str, now: datetime) -> str | None:
+        channel = self.get_channel(self.settings.digest_channel_id or 0)
+        if not isinstance(channel, discord.abc.Messageable):
+            return "missing_channel"
+        await channel.send(await self.digest.build(guild_id, now), allowed_mentions=NO_MENTIONS)
+        return None
+
+    async def _refresh_news(self, guild_id: str, now: datetime) -> str | None:
+        items, errors = await self.news.refresh(self.settings.news_max_items_per_run)
+        await self.post_news_items(items)
+        return "feed_errors" if errors and not items else None
+
+    async def _maintain(self, guild_id: str, now: datetime) -> str | None:
+        await cleanup(self.database, now, self.settings.completed_deadline_retention_days)
+        await backup_database(self.database, self.settings.backup_path)
+        return None
+
+    async def _run_daily(
+        self,
+        job_name: str,
+        guild_id: str,
+        local: datetime,
+        work: Callable[[str, datetime], Awaitable[str | None]],
+    ) -> None:
+        """Run `work` at most once per local date; the claim row is the idempotency lock."""
+        job_id = await self.jobs.claim(job_name, guild_id, local.date().isoformat())
+        if not job_id:
+            return
+        try:
+            error_code = await work(guild_id, local.astimezone(UTC))
+        except Exception as exc:
+            LOGGER.error("job_failed job=%s type=%s", job_name, type(exc).__name__, exc_info=exc)
+            await self.jobs.finish(job_id, False, f"{job_name}_failed")
+            return
+        if error_code:
+            LOGGER.warning("job_degraded job=%s reason=%s", job_name, error_code)
+        await self.jobs.finish(job_id, error_code is None, error_code)
+
+    async def _tick(self) -> None:
+        local = datetime.now(UTC).astimezone(self.settings.timezone)
+        clock = local.strftime("%H:%M")
+        guild_id = str(self.settings.discord_test_guild_id)
+        if clock >= self.settings.digest_time_local and self.settings.digest_channel_id:
+            await self._run_daily("daily_digest", guild_id, local, self._send_digest)
+        if clock >= self.settings.news_time_local and self.settings.news_feed_urls:
+            await self._run_daily("daily_news", guild_id, local, self._refresh_news)
+        if clock >= MAINTENANCE_TIME_LOCAL:
+            await self._run_daily("daily_cleanup", guild_id, local, self._maintain)
+
     @tasks.loop(minutes=1)
     async def scheduler(self) -> None:
-        now = datetime.now(UTC)
-        local = now.astimezone(self.settings.timezone)
-        guild_id = str(self.settings.discord_test_guild_id)
-        if (
-            local.strftime("%H:%M") >= self.settings.digest_time_local
-            and self.settings.digest_channel_id
-        ):
-            job_id = await self.jobs.claim("daily_digest", guild_id, local.date().isoformat())
-            if job_id:
-                try:
-                    channel = self.get_channel(self.settings.digest_channel_id)
-                    if isinstance(channel, discord.abc.Messageable):
-                        await channel.send(
-                            await self.digest.build(guild_id, now), allowed_mentions=NO_MENTIONS
-                        )
-                        await self.jobs.finish(job_id, True)
-                    else:
-                        await self.jobs.finish(job_id, False, "missing_channel")
-                except Exception:
-                    await self.jobs.finish(job_id, False, "send_failed")
-        if (
-            local.strftime("%H:%M") >= self.settings.news_time_local
-            and self.settings.news_feed_urls
-        ):
-            news_job = await self.jobs.claim("daily_news", guild_id, local.date().isoformat())
-            if news_job:
-                try:
-                    items, _errors = await self.news.refresh(self.settings.news_max_items_per_run)
-                    await self.post_news_items(items)
-                    await self.jobs.finish(news_job, True)
-                except Exception:
-                    await self.jobs.finish(news_job, False, "news_failed")
-        if local.hour == 2 and local.minute == 0:
-            cleanup_job = await self.jobs.claim("daily_cleanup", guild_id, local.date().isoformat())
-            if cleanup_job:
-                try:
-                    await cleanup(
-                        self.database, now, self.settings.completed_deadline_retention_days
-                    )
-                    await backup_database(self.database, self.settings.backup_path)
-                    await self.jobs.finish(cleanup_job, True)
-                except Exception:
-                    await self.jobs.finish(cleanup_job, False, "maintenance_failed")
+        # discord.ext.tasks stops the loop on an unlisted exception, which would end every
+        # daily job until restart; a failed tick is logged and the next minute tries again.
+        try:
+            await self._tick()
+        except Exception as exc:
+            LOGGER.error("scheduler_tick_failed type=%s", type(exc).__name__, exc_info=exc)
 
     @scheduler.before_loop
     async def before_scheduler(self) -> None:

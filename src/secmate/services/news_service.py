@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import html
+import logging
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -12,13 +14,24 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import aiohttp
 import feedparser  # type: ignore[import-untyped]
 
+from secmate.config import NEWS_CATEGORY_CHANNEL_KEYS
 from secmate.errors import ValidationError
 from secmate.repositories.database import NewsRepository
 from secmate.services.ollama_service import OllamaService
 from secmate.utils.ids import public_id
 from secmate.utils.time import utc_text
 
-CATEGORIES = {"sårbarheder", "cyberangreb", "ai-security", "lovgivning", "andet"}
+LOGGER = logging.getLogger(__name__)
+
+CATEGORIES = frozenset(NEWS_CATEGORY_CHANNEL_KEYS)
+FALLBACK_CATEGORY = "andet"
+
+# Feed hosts behind bot management (cisa.gov among them) answer 403 to a bare product token;
+# a conventional feed-reader header set with a contact URL is accepted.
+FEED_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; SecMate/0.1; +https://github.com/Laugard/secmate)",
+    "Accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+}
 
 
 def canonical_url(value: str) -> str:
@@ -35,6 +48,21 @@ def plain_text(value: str, limit: int = 3000) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(value))).strip()[:limit]
 
 
+def published_at(entry: Any) -> str | None:
+    """The entry's publication instant as UTC text, from feedparser's parsed struct_time."""
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not parsed:
+        return None
+    return utc_text(datetime.fromtimestamp(calendar.timegm(parsed), UTC))
+
+
+def error_label(exc: BaseException) -> str:
+    """A short cause for operators; carries the HTTP status, never response content."""
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return f"HTTP {exc.status}"
+    return type(exc).__name__
+
+
 class FeedClient:
     def __init__(self, urls: tuple[str, ...], timeout: float, max_bytes: int) -> None:
         self.urls = urls
@@ -47,9 +75,7 @@ class FeedClient:
             raise ValidationError("Feedet er ikke allowlistet")
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         async with (
-            aiohttp.ClientSession(
-                timeout=timeout, headers={"User-Agent": "SecMate/0.1"}
-            ) as session,
+            aiohttp.ClientSession(timeout=timeout, headers=FEED_HEADERS) as session,
             session.get(url, allow_redirects=False) as response,
         ):
             if response.status in {301, 302, 303, 307, 308}:
@@ -88,60 +114,70 @@ class NewsService:
         self.retention_days = retention_days
 
     async def refresh(self, limit: int) -> tuple[list[dict[str, Any]], list[str]]:
+        """Store up to `limit` unseen entries across all feeds; returns (inserted, feed errors)."""
         inserted: list[dict[str, Any]] = []
         errors: list[str] = []
         for url in self.client.urls:
+            host = urlparse(url).hostname or "feed"
+            if len(inserted) >= limit:
+                break
             try:
                 parsed = feedparser.parse(await self.client.fetch(url))
                 if getattr(parsed, "bozo", False) and not parsed.entries:
                     raise ValidationError("Ugyldigt RSS/Atom-feed")
-                for entry in parsed.entries[:limit]:
+                for entry in parsed.entries:
                     if len(inserted) >= limit:
                         break
-                    link = canonical_url(str(entry.get("link", "")))
-                    title = plain_text(str(entry.get("title", "Uden titel")), 300)
-                    summary = plain_text(str(entry.get("summary", "")))
-                    fallback = {
-                        "category": "andet",
-                        "summary_da": f"AI-resumé utilgængeligt: {title}"[:450],
-                        "study_relevance_da": "Læs originalkilden og vurder relevansen.",
-                        "confidence": None,
-                    }
-                    classified = await self.ollama.structured(
-                        self.SYSTEM, f"Titel: {title}\nFeed-resumé: {summary}", fallback
-                    )
-                    category = (
-                        classified.get("category")
-                        if classified.get("category") in CATEGORIES
-                        else "andet"
-                    )
-                    now = datetime.now(UTC)
-                    item = {
-                        "id": public_id("news"),
-                        "dedupe_key": hashlib.sha256(link.encode()).hexdigest(),
-                        "source_name": urlparse(url).hostname or "feed",
-                        "title": title,
-                        "url": link,
-                        "published_at_utc": None,
-                        "fetched_at_utc": utc_text(now),
-                        "category": category,
-                        "summary_da": plain_text(
-                            str(classified.get("summary_da", fallback["summary_da"])), 450
-                        ),
-                        "study_relevance_da": plain_text(
-                            str(
-                                classified.get("study_relevance_da", fallback["study_relevance_da"])
-                            ),
-                            450,
-                        ),
-                        "confidence": classified.get("confidence")
-                        if isinstance(classified.get("confidence"), int | float)
-                        and 0 <= float(classified["confidence"]) <= 1
-                        else None,
-                        "expires_at_utc": utc_text(now + timedelta(days=self.retention_days)),
-                    }
-                    if await self.repository.insert(item):
+                    item = await self._classify_unseen(entry, host)
+                    if item is not None and await self.repository.insert(item):
                         inserted.append(item)
             except Exception as exc:
-                errors.append(f"{urlparse(url).hostname}: {type(exc).__name__}")
-        return inserted[:limit], errors
+                label = error_label(exc)
+                LOGGER.warning("feed_failed host=%s error=%s", host, label)
+                errors.append(f"{host}: {label}")
+        return inserted, errors
+
+    async def _classify_unseen(self, entry: Any, source_name: str) -> dict[str, Any] | None:
+        """Classify one feed entry with the local model, or None when it is already stored.
+
+        The dedupe check runs before the model call: a refresh that finds nothing new must
+        cost zero generations, not one per entry.
+        """
+        link = canonical_url(str(entry.get("link", "")))
+        dedupe_key = hashlib.sha256(link.encode()).hexdigest()
+        if await self.repository.exists(dedupe_key):
+            return None
+        title = plain_text(str(entry.get("title", "Uden titel")), 300)
+        summary = plain_text(str(entry.get("summary", "")))
+        fallback = {
+            "category": FALLBACK_CATEGORY,
+            "summary_da": f"AI-resumé utilgængeligt: {title}"[:450],
+            "study_relevance_da": "Læs originalkilden og vurder relevansen.",
+            "confidence": None,
+        }
+        classified = await self.ollama.structured(
+            self.SYSTEM, f"Titel: {title}\nFeed-resumé: {summary}", fallback
+        )
+        category = classified.get("category")
+        confidence = classified.get("confidence")
+        now = datetime.now(UTC)
+        return {
+            "id": public_id("news"),
+            "dedupe_key": dedupe_key,
+            "source_name": source_name,
+            "title": title,
+            "url": link,
+            "published_at_utc": published_at(entry),
+            "fetched_at_utc": utc_text(now),
+            "category": category if category in CATEGORIES else FALLBACK_CATEGORY,
+            "summary_da": plain_text(
+                str(classified.get("summary_da") or fallback["summary_da"]), 450
+            ),
+            "study_relevance_da": plain_text(
+                str(classified.get("study_relevance_da") or fallback["study_relevance_da"]), 450
+            ),
+            "confidence": float(confidence)
+            if isinstance(confidence, int | float) and 0 <= confidence <= 1
+            else None,
+            "expires_at_utc": utc_text(now + timedelta(days=self.retention_days)),
+        }

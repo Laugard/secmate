@@ -12,6 +12,16 @@ from dotenv import load_dotenv
 
 from secmate.errors import ConfigurationError
 
+# News category -> the env key naming its Discord channel. The category set the classifier
+# may return is derived from this mapping, so a category cannot exist without a channel slot.
+NEWS_CATEGORY_CHANNEL_KEYS = {
+    "sårbarheder": "DISCORD_NEWS_VULNERABILITIES_CHANNEL_ID",
+    "cyberangreb": "DISCORD_NEWS_ATTACKS_CHANNEL_ID",
+    "ai-security": "DISCORD_NEWS_AI_SECURITY_CHANNEL_ID",
+    "lovgivning": "DISCORD_NEWS_LAW_CHANNEL_ID",
+    "andet": "DISCORD_NEWS_OTHER_CHANNEL_ID",
+}
+
 
 def _integer(env: dict[str, str], key: str, default: int, *, minimum: int = 0) -> int:
     raw = env.get(key, str(default)).strip()
@@ -161,11 +171,8 @@ class Settings:
             news_time_local=_clock(env.get("DAILY_NEWS_TIME", "09:15"), "DAILY_NEWS_TIME"),
             digest_channel_id=_optional_id(env, "DISCORD_DIGEST_CHANNEL_ID"),
             news_channel_ids={
-                "sårbarheder": _optional_id(env, "DISCORD_NEWS_VULNERABILITIES_CHANNEL_ID"),
-                "cyberangreb": _optional_id(env, "DISCORD_NEWS_ATTACKS_CHANNEL_ID"),
-                "ai-security": _optional_id(env, "DISCORD_NEWS_AI_SECURITY_CHANNEL_ID"),
-                "lovgivning": _optional_id(env, "DISCORD_NEWS_LAW_CHANNEL_ID"),
-                "andet": _optional_id(env, "DISCORD_NEWS_OTHER_CHANNEL_ID"),
+                category: _optional_id(env, key)
+                for category, key in NEWS_CATEGORY_CHANNEL_KEYS.items()
             },
             admin_role_id=_optional_id(env, "DISCORD_ADMIN_ROLE_ID"),
             ollama_timeout=_floating(env, "OLLAMA_REQUEST_TIMEOUT_SECONDS", 120, minimum=1),

@@ -18,6 +18,8 @@ from secmate.services.ollama_service import OllamaService
 from secmate.services.rag_service import pack_embedding
 
 SUPPORTED = {".pdf", ".md", ".txt"}
+# One embed request per batch keeps a 200-page PDF inside the per-request Ollama timeout.
+EMBED_BATCH_SIZE = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +134,7 @@ class IngestionService:
                     continue
                 pages = await asyncio.to_thread(_extract, path, self.max_pages)
                 chunks = chunk_pages(pages, self.chunk_chars, self.overlap_chars)
-                vectors = await self.ollama.embed([chunk["content"] for chunk in chunks])
+                vectors = await self._embed_batched([chunk["content"] for chunk in chunks])
                 for chunk, vector in zip(chunks, vectors, strict=True):
                     chunk["embedding"] = pack_embedding(vector)
                     chunk["embedding_dimensions"] = len(vector)
@@ -151,3 +153,9 @@ class IngestionService:
             except Exception as exc:
                 errors.append(f"{path.name}: {type(exc).__name__}: {exc}")
         return IngestionReport(indexed, unchanged, chunk_count, 0, tuple(errors))
+
+    async def _embed_batched(self, texts: list[str]) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), EMBED_BATCH_SIZE):
+            vectors.extend(await self.ollama.embed(texts[start : start + EMBED_BATCH_SIZE]))
+        return vectors

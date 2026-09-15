@@ -123,15 +123,7 @@ class MemoryRepository:
         async with self.database.connect() as db:
             await db.execute(
                 "INSERT INTO memories VALUES(?,?,?,?,?)",
-                tuple(item.__dict__.values())
-                if hasattr(item, "__dict__")
-                else (
-                    item.id,
-                    item.guild_id,
-                    item.content,
-                    item.created_at_utc,
-                    item.expires_at_utc,
-                ),
+                (item.id, item.guild_id, item.content, item.created_at_utc, item.expires_at_utc),
             )
             await db.commit()
         return item
@@ -337,7 +329,7 @@ class DocumentRepository:
                     "SELECT c.id,c.document_id,d.display_name,c.chunk_index,c.page_start,"
                     "c.page_end,c.content,c.embedding,c.embedding_dimensions,c.embed_model "
                     "FROM document_chunks c JOIN documents d ON d.id=c.document_id "
-                    "ORDER BY d.indexed_at_utc DESC,c.chunk_index LIMIT ?",
+                    "ORDER BY RANDOM() LIMIT ?",
                     (limit,),
                 )
             ).fetchall()
@@ -374,6 +366,13 @@ class NewsRepository:
             return True
         except sqlite3.IntegrityError:
             return False
+
+    async def exists(self, dedupe_key: str) -> bool:
+        async with self.database.connect() as db:
+            row = await (
+                await db.execute("SELECT 1 FROM news_items WHERE dedupe_key=?", (dedupe_key,))
+            ).fetchone()
+        return row is not None
 
     async def latest(self, category: str | None = None, limit: int = 5) -> list[dict[str, Any]]:
         sql = "SELECT * FROM news_items"
