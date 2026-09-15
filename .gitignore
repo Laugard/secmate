@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv/
 venv/
 __pycache__/
@@ -15,6 +17,8 @@ build/
 # Runtime- og studiedata må ikke i git
 data/*.db
 data/*.db-*
+*.sqlite
+*.sqlite3
 data/documents/*
 !data/documents/.gitkeep
 data/backups/*
@@ -26,4 +30,3 @@ logs/*
 .DS_Store
 .idea/
 .vscode/
-

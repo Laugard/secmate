@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "secmate"
+version = "0.1.0"
+description = "Local-first Discord study assistant"
+requires-python = ">=3.12"
+dependencies = [
+  "aiohttp==3.14.3",
+  "aiosqlite==0.22.1",
+  "discord.py==2.7.1",
+  "feedparser==6.0.14",
+  "ollama==0.6.2",
+  "pypdf==6.18.1",
+  "python-dotenv==1.2.3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy==1.17.1",
+  "pip-audit==2.9.0",
+  "pytest==8.4.1",
+  "pytest-asyncio==1.1.0",
+  "ruff==0.12.8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["secmate"]
+exclude = ["tests"]
