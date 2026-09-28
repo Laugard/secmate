@@ -1,6 +1,6 @@
 # Implementeringsstatus
 
-Senest opdateret: 15. september 2026.
+Senest opdateret: 28. september 2026.
 
 | Fase | Status | Tests | Blocker/næste trin |
 |---|---|---|---|
@@ -11,9 +11,18 @@ Senest opdateret: 15. september 2026.
 | 4 | done | PDF/MD, side, chunking, idempotens, atomic failure, retrieval/no-evidence, symlink/size/OCR | Rigtigt studiedokument vælges manuelt |
 | 5 | done | minimale intents, permissions, limits, defer-kontrakt, splitting/mentions, citations | Discord-login/sync kræver token og guild |
 | 6 | done | atomic daily claim/restart, digest fallback, cleanup og backup/rotation | Live kanalopslag kræver Discord |
-| 7 | done | RSS-fixture, HTML-sanitization, HTTPS, injection-resistens, JSON fallback, dedupe | Officielt feed og kanaler live-testes manuelt |
+| 7 | done | RSS-fixture, HTML-sanitization, HTTPS, injection-resistens, JSON fallback, dedupe, kategorier og retfærdig feedfordeling | Flere feedkategorier live-testes manuelt |
 | 8 | done | allowlist, flere runder, ukendt tool og 4-runders cap | Live model-toolcalling kræver Ollama |
-| 9 | blocked_manual | 51 tests, Ruff, format, strict mypy, smoke og audit grønne | L-01–L-06 og lokal doctor mangler |
+| 9 | blocked_manual | 61 tests, Ruff, format, strict mypy og smoke kontrolleres på ny; tidligere audit grøn | L-01–L-06 kræver gruppens fulde live-evidens |
+
+## Nyhedskategorisering 28. september 2026
+
+- Brugerens live-observation før ændringen: `/health` var grøn; `/news refresh` viste 5 nye, 5 postede, 0 feedfejl. Et efterfølgende refresh gav fem andre artikler. De fleste CVE/KEV-notitser blev fejlagtigt sendt til `cyberangreb`.
+- Kategori-instruktionen til den lokale model definerer nu klare skel mellem sårbarheder, konkrete angreb, AI-sikkerhed og lovgivning. Tydelige overskrifter og CVE/KEV i feedresuméet kan korrigere et generisk modelvalg. En hændelsesoverskrift vinder over baggrunds-CVE'er i resuméet. Tvetydige artikler følger fortsat modellen.
+- Feed-kørslen gennemgår flere konfigurerede feeds på skift, så det første feed ikke optager alle `NEWS_MAX_ITEMS_PER_RUN` pladser. Dedupe og det samlede postloft gælder stadig; allerede gemte nyheder omklassificeres/flyttes ikke.
+- Der er føjet regressions- og integrationstests til CISA-overskrifter, hændelser, AI, lovgivning, flere feeds og gentagne refresh. Brugerens Mac skal stadig hente en merged version og live-teste kanal-routing.
+- Lokale kontroller: Python 3.12.14, 61 pytest-tests bestået, Ruff lint/format grøn, mypy strict grøn (`--no-incremental` efter en lokal cachefejl), smoke test grøn. En ny `pip-audit` kunne ikke afsluttes i dette miljø; seneste dokumenterede audit fra 15. september var grøn, og dependencies er ikke ændret i denne branch.
+- Kun CISA-feedet er standard i `.env.example`; en bredere emnefordeling kræver flere *verificerede officielle* RSS/Atom-feeds i den lokale `.env` og passende kanal-ID'er. Der er ikke lagt nye, uverificerede URL'er ind i kode eller standardkonfiguration.
 
 ## Kodegennemgang 15. september 2026
 
@@ -55,4 +64,3 @@ Alle er dækket af automatiske tests eller direkte kontrakttests og er grønne. 
 4. Vælg mindst én tilladt, maskinlæsbar og ikke-fortrolig PDF, I ikke selv har skrevet, og læg den i `data/documents/`.
 5. Start `python -m secmate` og gennemfør L-01–L-06 med mindst to gruppemedlemmer; registrér kun anonymiseret evidens i `docs/LIVE_TEST_RESULTS.md`.
 6. Kør `python scripts/backup_db.py` før demo. Tag først release-tag `v0.1.0`, når alle live MUST-tests er bestået.
-

@@ -9,6 +9,7 @@ SecMate er en lokal-first Discord-assistent til en IT-sikkerhedsstudiegruppe. Di
 - `/deadlines add|list|complete|delete` giver deterministiske deadlines i dansk tid.
 - `/today` og en daglig digest giver deadlines og et kildebaseret quizspørgsmål.
 - `/news latest|refresh` henter kun konfigurerede HTTPS RSS/Atom-feeds, deduplikerer og bruger lokal AI til dansk resumé.
+- Nyhedskategori bestemmes først af tydelige signaler i overskriften (fx CVE/KEV → `sårbarheder`, NIS2 → `lovgivning`); tvetydige artikler klassificeres af lokal AI. Et feed om sårbarheder giver stadig hovedsageligt opslag i `sårbarheder`.
 - `/assistant` kan kombinere fire allowlistede read-only tools i højst fire modelrunder.
 - `/health` viser database, Ollama, modeller, dokumentindeks og kanalkonfiguration.
 - Daglig cleanup og verificeret SQLite online-backup med syv kopier.
@@ -93,6 +94,6 @@ Discord Developer Portal → Bot → Reset Token. Opdatér kun den lokale `.env`
 - `/ask` uden belæg: kontrollér dokumenttype, kør reindex og brug et spørgsmål med kendt svar.
 - Forkert PDF-side: menneskelig side er parserindeks + 1; verificér mod originalen.
 - Feedfejl: opdatér kun til en officiel HTTPS-feed-URL i `.env`; svæk ikke allowlisten.
+- Mangler nyheder i flere kategorier: tilføj verificerede officielle RSS/Atom-feeds for de ønskede emner som kommaseparerede URL'er i `NEWS_FEED_URLS` i den lokale `.env`. Genstart botten. Feeds deles om grænsen `NEWS_MAX_ITEMS_PER_RUN` på skift, og `/news refresh` poster kun nye links. Ældre poster omklassificeres ikke automatisk.
 
 Se [docs/STATUS.md](docs/STATUS.md) for teststatus og resterende manuelle trin.
-
